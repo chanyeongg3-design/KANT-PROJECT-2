@@ -4,18 +4,27 @@ import json # 원본에서 제공된 JSON 모듈
 import sys # 현재 main 모듈을 support의 실행 진입점에 전달
 import time # 실행 단계별 경과 시간을 측정
 
-# LangChain: 실행 이벤트, 세션 이력, 검색 문서의 기본 자료형
+# LangChain: 실행 과정과 오류 기록 
 from langchain_core.callbacks import BaseCallbackHandler
+# 사용자별 대화 기록 저장
 from langchain_core.chat_history import InMemoryChatMessageHistory
+# 검색할 문서의 본문과 메타데이터 관리
 from langchain_core.documents import Document
 
-# 대화 메시지, 구조화된 답변 검사, 프롬프트 구성 담당
+# AI와 사용자 메시지 생성
 from langchain_core.messages import AIMessage, HumanMessage
+# AI 응답을 정해진 데이터 형식으로 변환
 from langchain_core.output_parsers import PydanticOutputParser
+# 프롬프트 구성 및 이전 대화 삽입 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 # Branch: 조건 분기 / Lambda: 함수 연결 / Parallel: 병렬 처리 / Passthrough: 입력 보존
-from langchain_core.runnables import RunnableBranch, RunnableLambda, RunnableParallel, RunnablePassthrough
+from langchain_core.runnables import (
+    RunnableBranch,            # 조건에 따라 실행 경로 선택    
+    RunnableLambda,            # 일반 함수를 체인에 연결
+    RunnableParallel,          # 여러 작업을 병렬 실행
+    RunnablePassthrough,       # 입력 데이터 유지 및 전달 
+)
 
 import support
 
@@ -30,6 +39,8 @@ def todo(description):
 
 
 # 필수 1: 문서 검색
+
+# 원본 데이터를 LangChain Document 객체로 변환
 def to_documents(rows, keywords):
     """문서 변환: 본문과 metadata를 나눈 Document를 만듭니다."""
     documents = []
@@ -47,6 +58,7 @@ def to_documents(rows, keywords):
     return documents
 
 
+# 허용된 문서에서 키워드가 일치하는 상위 문서 검색 
 def search_documents(query, documents, allowed_ids, top_k=3):
     """키워드 검색: 후보를 제한하고 일치한 키워드 수로 검색합니다."""
     if type(top_k) is not int or not 1 <= top_k <= 3:
@@ -71,6 +83,7 @@ def search_documents(query, documents, allowed_ids, top_k=3):
     return [item[2] for item in scored[:top_k]]
 
 
+# 검색된 문서를 AI  프롬프트에 사용할 문자열로 변환
 def format_context(documents):
     """제공: 검색 문서를 제목, 출처, 본문으로 표시합니다."""
     if not documents:
@@ -81,6 +94,7 @@ def format_context(documents):
         f'{doc.page_content}\n</document>' for doc in documents)
 
 
+# 원본 입력을 유지하면서 문서 검색과 Context 생성을 연결 
 def build_context_chain(documents):
     """검색 입력 연결: 입력 보존과 검색을 병렬로 연결합니다."""
     # 작성 이유: 입력 보존과 검색을 나누는 이유를 한두 줄로 적으세요.
@@ -105,6 +119,8 @@ def build_context_chain(documents):
 
 
 # 필수 2: 기본 체인
+
+# AI에게 전달할 프롬프트와 응답 변환기 생성 
 def build_prompt_and_parser():
     """프롬프트와 파서: 답변 형식과 이전 대화 자리를 연결합니다."""
 
@@ -118,6 +134,7 @@ def build_prompt_and_parser():
     return prompt.with_config(run_name="prompt"), parser.with_config(run_name="parser")
 
 
+# AI 답변의 출처가 실제 검색 문서에 포함되는지 검사 
 def validate_sources(answer, documents):
     """출처 검사: 이번에 검색한 문서만 출처로 허용합니다."""
     answer = support.Answer.model_validate(answer)
@@ -132,7 +149,7 @@ def validate_sources(answer, documents):
         raise support.SourceValidationError("근거 없는 답변에는 담당자 확인이 필요합니다.")
     return answer
 
-
+# 프롬프트 -> 모델 -> 파서 -> 출처 검증 순서로 연결 
 def build_primary_chain(model):
     """기본 체인 연결: prompt, model, parser와 출처 검사를 연결합니다."""
     prompt, parser = build_prompt_and_parser()
@@ -148,7 +165,7 @@ def build_primary_chain(model):
     return (RunnablePassthrough.assign(parsed=generate.with_config(run_name="generate_parse"))
             | RunnableLambda(finish).with_config(run_name="validate_sources")).with_config(run_name="primary")
 
-
+# 검색 문서 유무에 따라 AI 호출 여부 결정 
 def build_answer_chain(model, reliable=False):
     """문서 없음 분기: 문서가 없으면 모델을 호출하지 않습니다."""
     primary = build_primary_chain(model)
@@ -164,6 +181,8 @@ def build_answer_chain(model, reliable=False):
 
 
 # 필수 3: 대화 이력
+
+# 세션 ID를 기준으로 사용자별 대화 기록 조회 및 생성 
 def get_history(store, session_id):
     """세션 이력: 세션마다 별도의 이력 객체를 보관합니다."""
     if not isinstance(session_id, str) or not session_id.strip():
@@ -175,6 +194,7 @@ def get_history(store, session_id):
     return store[session_id]
 
 
+# 정상 처리된 질문과 AI 답변을 대화 기록에 저장 
 def commit_history(store, session_id, question, outcome):
     """이력 저장: 완료된 primary의 질문과 답변만 저장합니다."""
     # 작성 이유: 검색 문서와 대화 이력을 구분하고 primary만 저장하는 이유를 적으세요.
@@ -189,14 +209,17 @@ def commit_history(store, session_id, question, outcome):
 
 
 # 필수 4: 실패 복구
+
+# 복구 가능한 오류 발생 시 재시도하고 실패하면 대체 답변 반환
 def build_resilient_chain(primary):
     """실패 복구: 허용 오류에만 처음을 포함해 최대 두 번 시도합니다."""
     retry = primary.with_retry(retry_if_exception_type=support.RECOVERABLE,
                                stop_after_attempt=2, wait_exponential_jitter=False)
-    
     fallback = RunnableLambda(lambda value: {"reply": support.safe_answer("fallback"),
                                             "route": "fallback"}).with_config(run_name="fallback")
     return retry.with_fallbacks([fallback], exceptions_to_handle=support.RECOVERABLE)
+
+# AI 응답을 실시간으로 전달하고 최종 답변을 검증 
 def stream_answer(prepared, model, config=None):
     """청크 전달: 아래 순서대로 청크 전달, 검증과 실패 분기를 채웁니다."""
     # 관측 메모: 실행 기록에서 확인한 실패 단계와 처리 결과를 한두 줄로 적으세요.
@@ -244,11 +267,12 @@ def stream_answer(prepared, model, config=None):
             # 제공: 정상, 실패, 소비 중단 모두에서 하위 스트림을 닫습니다.
             iterator.close()
 
-# 실행 관측: 체인, 모델 이벤트를 받아 시간, 청크 수, 사용량과 오류 종류를 기록한다. 
+# LangChain 실행 시간, 토큰 청크, 오류 및 사용량 기록 
 class TraceHandler(BaseCallbackHandler):
     """실행 기록: 잠금, 상태 보관과 기록 형식은 제공됩니다. 측정할 값만 채웁니다."""
     raise_error = True
 
+    # 게록 환경 및 실행 상태 초기화
     def __init__(self, mode="fixture", path=None, clock=time.perf_counter):
         self.mode = mode
         self.clock = clock
@@ -259,6 +283,7 @@ class TraceHandler(BaseCallbackHandler):
         self.active = {}
         self.model_attempts = 0
 
+    # 체인 또는 모델의 실행 시작 시간과 상태 기록 
     def _start(self, kind, run_id, parent_run_id, name):
 
         # 병령 콜백이 공유 상테를 동시에 바꾸지 않도록 잠금 안에서 기록한다. 
@@ -274,6 +299,8 @@ class TraceHandler(BaseCallbackHandler):
                              "parent_run_id": state["parent_run_id"], "mode": self.mode,
                              "elapsed_ms": 0.0, "chunk_count": 0, "usage": None, "error_type": None})
 
+
+    # 실행 종료 시간, 오류 및 토큰 사용량 기록 
     def _finish(self, kind, run_id, error=None, usage=None):
         with self.sink.lock:
             key = str(run_id)
@@ -290,6 +317,7 @@ class TraceHandler(BaseCallbackHandler):
                              "elapsed_ms": max(0.0, elapsed_ms), "chunk_count": state["chunk_count"],
                              "usage": usage, "error_type": error_type})
 
+    # AI가 생성한 텍스트 청크의 개수와 처리 시간 기록 
     def on_llm_new_token(self, token, *, run_id, parent_run_id=None, **kwargs):
         text = support.message_text(token)
         if not text:
@@ -307,21 +335,28 @@ class TraceHandler(BaseCallbackHandler):
                              "chunk_count": state["chunk_count"], "usage": None, "error_type": None})
 
     # 제공: LangChain 이벤트를 위 세 메서드에 연결합니다.
+
+    # 체인 실행 시작 이벤트 처리 
     def on_chain_start(self, serialized, inputs, *, run_id, parent_run_id=None, **kwargs):
         self._start("chain", run_id, parent_run_id, kwargs.get("name", "chain"))
 
+    # 체인 실행 완료 이벤트 처리 
     def on_chain_end(self, outputs, *, run_id, **kwargs):
         self._finish("chain", run_id)
 
+    # 체인 실행 중 발생한 오류 기록 
     def on_chain_error(self, error, *, run_id, **kwargs):
         self._finish("chain", run_id, error=error)
 
+    # AI 모델 호출 시작 이벤트 처리 
     def on_chat_model_start(self, serialized, messages, *, run_id, parent_run_id=None, **kwargs):
         self._start("model", run_id, parent_run_id, "model")
 
+    AI 모델 응답 완료 및 토큰 사용량 기록 
     def on_llm_end(self, response, *, run_id, **kwargs):
         self._finish("model", run_id, usage=support.extract_usage(response))
 
+    # AI 모델 호출 중 발생한 오류 기록 
     def on_llm_error(self, error, *, run_id, **kwargs):
         self._finish("model", run_id, error=error)
 
