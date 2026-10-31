@@ -20,13 +20,14 @@ from jsonschema import Draft202012Validator, ValidationError
 # 프로젝트에서 제공하는 공통 기능: API 전송 보조, 로그, 이미지 변환, 명령행 실행 등
 import support
 
-
+# 미구현된 기능을 오류로 알린다.
 def _todo(label):
     raise NotImplementedError(label)
 
 
 # 필수 1 / 정책 프롬프트. 문자열 두 개를 작성합니다.
-# 정책과 참고 문서로 모델 지시문 생성 
+# 사내 문서와 정책으로 AI 지시문 생성
+
 def build_instructions(documents, variant):
   """문서 목록과 실험 유형을 받아 모델에 전달할 지시문 문자열을 만든다.
 
@@ -74,7 +75,7 @@ def build_instructions(documents, variant):
 
 
 # 필수 2 / 답변 검증과 수정. 스키마를 만든 뒤 값과 출처를 검사합니다.
-# 답변 필드와 자료형 정의 
+# AI 답변에 필요한 JSON 형식 정의  
 def answer_format():
 
     # 이유: 네 필드의 자료형과 허용된 문의 분류를 고정하기 위해 사용한다. 
@@ -107,7 +108,7 @@ def answer_format():
     return {"format": {"type": "json_schema", "name": "devdesk_answer",
                        "strict": True, "schema": schema}}
 
-# 답변 형식과 출처 검사 
+# 답변의 JSON 형식과 출처 유효성 검사 
 def validate_answer(raw, known_ids):
     answer = json.loads(raw)
     Draft202012Validator(answer_format()["format"]["schema"]).validate(answer)
@@ -130,7 +131,7 @@ def validate_answer(raw, known_ids):
             raise ValueError(message)
     return answer
 
-
+# 답변 오류를 검사하고 수정 요청 또는 대체 답변 처리 
 def finish_answer(send, request, response, known_ids, events):
     request = copy.deepcopy(request)
     fallback = {"answer": "확인 가능한 답변을 만들지 못했습니다. 담당자 확인이 필요합니다.",
@@ -176,6 +177,8 @@ def finish_answer(send, request, response, known_ids, events):
 
 
 # 필수 3 / 티켓 조회. 티켓 조회 조건과 모델에 돌려줄 값을 정합니다.
+
+# 티켓 조회 도구의 이름과 입력 형식 정의
 def tool_schema():
     parameters = {
         "type": "object",
@@ -192,7 +195,7 @@ def tool_schema():
             "description": "기존 티켓의 상태를 읽습니다. 티켓을 변경하지 않습니다.",
             "parameters": parameters}
 
-
+# 티켓 번호를 검사하고 해당 티켓 정보 조회
 def execute_tool(name, arguments, tickets):
     if name != "lookup_ticket":
         return {"ok": False, "error": "unknown_tool"}
@@ -210,6 +213,7 @@ def execute_tool(name, arguments, tickets):
     return {"ok": True, "ticket": copy.deepcopy(tickets[ticket_id])}
 
 
+# AI의 도구 호출을 실행하고 조회 결과를 다시 전달 
 def tool_roundtrip(send, request, tickets, events):
     request = copy.deepcopy(request)
     for _ in range(4):
@@ -239,7 +243,7 @@ def tool_roundtrip(send, request, tickets, events):
     return request, {"status": "round_limit", "output": []}
 
 
-# 오류 화면 입력. 기존 텍스트 옆에 이미지 항목 하나를 추가합니다.
+# 질문과 이미지를 AI가 처리할 입력 데이터로 변환
 def image_content(question, image_path):
     """질문 문자열과 선택적 이미지 경로를 모델 입력 항목의 리스트로 변환한다.
     image_path가 None이면 텍스트만, 경로가 있으면 텍스트와 이미지를 함께 변한한다.
@@ -261,7 +265,7 @@ def image_content(question, image_path):
     return content
 
 
-# 호출 재시도. 반복과 기록은 준비되어 있습니다. 다시 시도할 조건을 작성합니다.
+# 일시적인 API 오류 발생 시 최대 3회 전송 시도 
 def call_with_retry(send, request, events, sleep=time.sleep):
     """일시적 전송 오류에 한해 최대 3번 시도하고, 응답 또는 실패 표시 None을 반환한다.
     
@@ -303,7 +307,7 @@ def call_with_retry(send, request, events, sleep=time.sleep):
     # 같은 요청 대신 틀린 출력과 수정 지시를 덧붙여 새로 요청한다.
 
 
-# 사용량과 비용. 고정 입력을 연결하고, 토큰을 골라 비용을 계산합니다.
+# 프롬프트 캐시에 사용할 고유 키 생성 
 def cache_settings(documents, variant):
     instructions = build_instructions(documents, variant)
     fingerprint = hashlib.sha256(instructions.encode("utf-8")).hexdigest()[:16]
@@ -312,6 +316,7 @@ def cache_settings(documents, variant):
             "prompt_cache_key": f"kant-next-pe-{variant}-{fingerprint}"}
 
 
+# 입력·출력 토큰 사용량과 예상 비용 계산 
 def usage_record(attempt, prices):
     response = attempt.get("response") or {}
     usage = response.get("usage") or {}
@@ -346,7 +351,7 @@ def usage_record(attempt, prices):
                                      reasoning, observation, estimate, assumption)
 
 
-# 전체 기능 연결. 준비된 실행 순서에 앞 함수들을 연결합니다.
+# 프롬프트 생성부터 답변 검증까지 전체 작업 실행 
 def run_pipeline(send, question, documents, tickets, variant="reasoning",
                  image_path=None, prices=None, sleep=time.sleep):
     prices = support.load_prices() if prices is None else prices
@@ -360,6 +365,7 @@ def run_pipeline(send, question, documents, tickets, variant="reasoning",
     request["parallel_tool_calls"] = False
     request["input"][0]["content"] = image_content(question, image_path)
 
+    # API 요청 시 오류가 발생하면 재시도하는 함수 
     def reliable_send(current_request):
         return call_with_retry(send, current_request, events, sleep=sleep)
 
