@@ -95,7 +95,7 @@ def answer_format():
         "category": {
             "type": "string",
             "enum": [
-                "installaction",
+                "installation",
                 "access",
                 "incident",
                 "general"
@@ -322,7 +322,7 @@ def usage_record(attempt, prices):
     usage = response.get("usage") or {}
     details = usage.get("input_tokens_details") or {}
     it = usage.get("input_tokens")
-    ot = usage.get("output_tokes")
+    ot = usage.get("output_tokens")
     cached = details.get("cached_tokens")
     written = details.get("cache_write_tokens")
     reasoning = (usage.get("output_tokens_details") or {}).get("reasoning_tokens")
@@ -343,7 +343,7 @@ def usage_record(attempt, prices):
                 + effective_write * prices["cache_write"]
                 + ot * prices["output"]
             ) / 1_000_000
-    observation = ("unavailable" if cached in None else "hit" if cached > 0 else "miss")
+    observation = ("unavailable" if cached is None else "hit" if cached > 0 else "miss")
     # 이유: 캐시 읽기, 쓰기 토큰은 전체 입력에 포함되므로 일반 입력에서 빼서 이중 청구를 막고, 
     # 추론 토큰은 출력의 일부라 다시 더하지 않는다.
     # fixture의 토큰 값은 실제 측정값이 아니며, 로그에서 request_id와 단가 출저, 확인일을 함께 남긴다. 
@@ -361,7 +361,7 @@ def run_pipeline(send, question, documents, tickets, variant="reasoning",
     request = support.base_request(settings["instructions"], question, variant)
     request.update(settings)
     request["text"] = answer_format()
-    request["tools"] = [tool_schema]
+    request["tools"] = [tool_schema()]
     request["parallel_tool_calls"] = False
     request["input"][0]["content"] = image_content(question, image_path)
 
